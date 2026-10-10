@@ -1,10 +1,11 @@
 import re, string, os, sys
 from dotenv import load_dotenv
 load_dotenv()
-sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "..")))
-sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "tools/planner")))
-sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "../tools/planner")))
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+script_dir = os.path.dirname(os.path.abspath(__file__))
+repo_root = os.path.abspath(os.path.join(script_dir, ".."))
+sys.path.insert(0, repo_root)
+sys.path.append(os.path.join(repo_root, "tools/planner"))
+os.chdir(script_dir)
 import importlib
 from typing import List, Dict, Any
 import tiktoken
@@ -154,6 +155,15 @@ class ReactAgent:
                 raise ValueError("GOOGLE_API_KEY is required when using 'gemini' model. Please set it in your .env file.")
             self.llm = ChatGoogleGenerativeAI(temperature=0,model="gemini-pro",google_api_key=GOOGLE_API_KEY)
             self.max_token_length = 30000
+
+        else:
+            stop_list = ['\n']
+            self.max_token_length = 30000
+            self.llm = ChatOpenAI(temperature=0,
+                     max_tokens=256,
+                     model_name=react_llm_name,
+                     openai_api_key=OPENAI_API_KEY or "EMPTY",
+                     model_kwargs={"stop": stop_list})
 
 
         self.illegal_early_stop_patience = illegal_early_stop_patience
@@ -652,13 +662,25 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--set_type", type=str, default="validation")
     parser.add_argument("--model_name", type=str, default="gpt-3.5-turbo-1106")
-    parser.add_argument("--output_dir", type=str, default="./")
+    parser.add_argument("--output_dir", type=str, default="./output")
+    parser.add_argument("--query_indices", type=str, default=None, help="Optional comma-separated query indices to run, e.g. 1,2 or 1-5")
     args = parser.parse_args()
+    args.output_dir = os.path.abspath(args.output_dir)
     if args.set_type == 'validation':
         query_data_list  = load_dataset('osunlp/TravelPlanner','validation')['validation']
     elif args.set_type == 'test':
         query_data_list  = load_dataset('osunlp/TravelPlanner','test')['test']
-    numbers = [i for i in range(1,len(query_data_list)+1)]
+    if args.query_indices:
+        indices = []
+        for part in args.query_indices.split(','):
+            if '-' in part:
+                start, end = map(int, part.split('-'))
+                indices.extend(range(start, end + 1))
+            else:
+                indices.append(int(part.strip()))
+        numbers = indices
+    else:
+        numbers = [i for i in range(1,len(query_data_list)+1)]
     agent = ReactAgent(None, tools=tools_list,max_steps=30,react_llm_name=args.model_name,planner_llm_name=args.model_name)
     with get_openai_callback() as cb:
         

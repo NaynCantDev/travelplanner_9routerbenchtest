@@ -10,3 +10,15 @@ database/**/*.txt
 agents/tmp/ec7223a39ce59f226a68acc30dc1af2788490e15
 
 evaluation/validation/*.json
+
+# Local experiment outputs & scratch files
+__MACOSX/
+agents/output_validate/
+agents/output/
+agents/tmp/
+evaluation/tmp/
+postprocess/submission/
+postprocess/tmp/
+postprocess/*_eval_results.json
+test_1000_queries.json
+

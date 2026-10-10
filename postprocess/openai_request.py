@@ -5,6 +5,7 @@ import openai
 import math
 import sys
 import time
+import requests
 from tqdm import tqdm
 from typing import Iterable, List, TypeVar
 import func_timeout
@@ -21,6 +22,8 @@ KEY_POOL =  [
 if not KEY_POOL[0]:
     raise ValueError("OPENAI_API_KEY is required. Please set it in your .env file.")
 openai.api_key = KEY_POOL[0]
+if os.environ.get('OPENAI_API_BASE'):
+    openai.api_base = os.environ.get('OPENAI_API_BASE')
 
 
 class TimeoutError(Exception):
@@ -29,17 +32,37 @@ class TimeoutError(Exception):
 def timeout_handler(signum, frame):
     raise TimeoutError("The function takes too long to run")
 
+def call_llm(model, messages, temp, max_tokens=2048):
+    api_base = os.environ.get('OPENAI_API_BASE')
+    api_key = os.environ.get('OPENAI_API_KEY', 'EMPTY')
+    if api_base:
+        url = f"{api_base.rstrip('/')}/chat/completions"
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': model,
+            'messages': messages,
+            'temperature': temp,
+            'stream': False
+        }
+        resp = requests.post(url, headers=headers, json=data, timeout=120)
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code}: {resp.text}")
+        raw = resp.text.strip().split('\ndata: [DONE]')[0].strip()
+        return json.loads(raw)
+    else:
+        return openai.ChatCompletion.create(
+            model=model,
+            messages=messages,
+            temperature=temp
+        )
+
 @func_set_timeout(120)
 def limited_execution_time(func,model,prompt,temp,max_tokens=2048, default=None,**kwargs):
     try:
-        if 'gpt-3.5-turbo' in model or 'gpt-4' in model:
-            result = func(
-                    model=model,
-                    messages=prompt,
-                    temperature=temp
-                )
-        else:
-            result = func(model=model,prompt=prompt,max_tokens=max_tokens,**kwargs)
+        result = call_llm(model=model, messages=prompt, temp=temp, max_tokens=max_tokens)
     except func_timeout.exceptions.FunctionTimedOut:
         return None
     # raise any other exception
@@ -83,7 +106,7 @@ def openai_unit_price(model_name,token_type="prompt"):
     elif 'ada' in model_name:
         unit = 0.0004
     else:
-        unit = -1
+        unit = 0.0
     return unit
 
 
@@ -126,29 +149,34 @@ def keep_logprobs_before_eos(tokens, logprobs):
 
 def catch_openai_api_error(prompt_input: list):
     global KEY_INDEX
-    error = sys.exc_info()[0]
-    if error == openai.error.InvalidRequestError:
+    exc_type, exc_val, _ = sys.exc_info()
+    if exc_type == openai.error.InvalidRequestError:
         # something is wrong: e.g. prompt too long
         print(f"InvalidRequestError\nPrompt:\n\n{prompt_input}\n\n")
         assert False
-    elif error == openai.error.RateLimitError:
+    elif exc_type == openai.error.RateLimitError:
         KEY_INDEX = (KEY_INDEX + 1) % len(KEY_POOL)
         openai.api_key = KEY_POOL[KEY_INDEX]
         print("RateLimitError, now change the key. Current key is ", openai.api_key)
-    elif error == openai.error.APIError:
+        time.sleep(5)
+    elif exc_type == openai.error.APIError:
         KEY_INDEX = (KEY_INDEX + 1) % len(KEY_POOL)
         openai.api_key = KEY_POOL[KEY_INDEX]
         print("APIError, now change the key. Current key is ", openai.api_key)
-    elif error == openai.error.AuthenticationError:
+        time.sleep(5)
+    elif exc_type == openai.error.AuthenticationError:
         KEY_INDEX = (KEY_INDEX + 1) % len(KEY_POOL)
         openai.api_key = KEY_POOL[KEY_INDEX]
         print("AuthenticationError, now change the key. Current key is ", openai.api_key)
-    elif error == TimeoutError:
+        time.sleep(5)
+    elif exc_type == TimeoutError:
         KEY_INDEX = (KEY_INDEX + 1) % len(KEY_POOL)
         openai.api_key = KEY_POOL[KEY_INDEX]
         print("TimeoutError, retrying...")
+        time.sleep(2)
     else:
-        print("API error:", error)
+        print(f"API error: {exc_val}")
+        time.sleep(5)
 
 
 def prompt_gpt3(prompt_input: list, save_path,model_name='text-davinci-003', max_tokens=2048,
@@ -203,8 +231,8 @@ def prompt_chatgpt(system_input, user_input, temperature,save_path,index,history
 
     assistant_output = completion['choices'][0]['message']['content']
     history.append({"role": "assistant", "content": assistant_output})
-    total_prompt_tokens = completion['usage']['prompt_tokens']
-    total_completion_tokens = completion['usage']['completion_tokens']
+    total_prompt_tokens = completion.get('usage', {}).get('prompt_tokens', 0) if completion.get('usage') else 0
+    total_completion_tokens = completion.get('usage', {}).get('completion_tokens', 0) if completion.get('usage') else 0
     with open(save_path,'a+',encoding='utf-8') as f:
         assistant_output = str(index)+"\t"+"\t".join(x for x in assistant_output.split("\n"))
         f.write(assistant_output+'\n')
@@ -237,7 +265,26 @@ JSON\n"""
         prompt_list.append(prompt)
     return prompt_list
 
-def build_plan_format_conversion_prompt(directory, set_type='validation',model_name='gpt4',strategy='direct',mode='two-stage'):
+def parse_query_indices(query_indices, max_len=None):
+    if not query_indices:
+        return list(range(1, max_len + 1)) if max_len else []
+    indices = []
+    for part in query_indices.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            start, end = map(int, part.split('-'))
+            indices.extend(range(start, end + 1))
+        else:
+            indices.append(int(part))
+    indices = sorted(list(set(indices)))
+    if max_len:
+        indices = [i for i in indices if 1 <= i <= max_len]
+    return indices
+
+
+def build_plan_format_conversion_prompt(directory, set_type='validation', model_name='gpt4', strategy='direct', mode='two-stage', query_indices=None):
     prompt_list = []
     prefix = """Please assist me in extracting valid information from a given natural language text and reconstructing it in JSON format, as demonstrated in the following example. If transportation details indicate a journey from one city to another (e.g., from A to B), the 'current_city' should be updated to the destination city (in this case, B). Use a ';' to separate different attractions, with each attraction formatted as 'Name, City'. If there's information about transportation, ensure that the 'current_city' aligns with the destination mentioned in the transportation details (i.e., the current city should follow the format 'from A to B'). Also, ensure that all flight numbers and costs are followed by a colon (i.e., 'Flight Number:' and 'Cost:'), consistent with the provided example. Each item should include ['day', 'current_city', 'transportation', 'breakfast', 'attraction', 'lunch', 'dinner', 'accommodation']. Replace non-specific information like 'eat at home/on the road' with '-'. Additionally, delete any '$' symbols.
 -----EXAMPLE-----
@@ -280,16 +327,28 @@ def build_plan_format_conversion_prompt(directory, set_type='validation',model_n
     elif set_type == 'test':
         query_data_list  = load_dataset('osunlp/TravelPlanner','test')['test']
 
-    idx_number_list = [i for i in range(1,len(query_data_list)+1)]
+    if query_indices:
+        idx_number_list = parse_query_indices(query_indices, len(query_data_list))
+    else:
+        idx_number_list = [i for i in range(1, len(query_data_list) + 1)]
+
     if mode == 'two-stage':
         suffix = ''
     elif mode == 'sole-planning':
         suffix = f'_{strategy}'
-    for idx in tqdm(idx_number_list):
-        generated_plan = json.load(open(f'{directory}/{set_type}/generated_plan_{idx}.json'))
-        if generated_plan[-1][f'{model_name}{suffix}_{mode}_results'] and generated_plan[-1][f'{model_name}{suffix}_{mode}_results'] != "":
+    for idx in tqdm(idx_number_list, desc="Scanning queries"):
+        plan_path = f'{directory}/{set_type}/generated_plan_{idx}.json'
+        if not os.path.exists(plan_path):
+            prompt_list.append((idx, ""))
+            continue
+        try:
+            generated_plan = json.load(open(plan_path, encoding='utf-8'))
+        except Exception:
+            prompt_list.append((idx, ""))
+            continue
+        if generated_plan[-1].get(f'{model_name}{suffix}_{mode}_results') and generated_plan[-1][f'{model_name}{suffix}_{mode}_results'] != "":
             prompt = prefix + "Text:\n"+generated_plan[-1][f'{model_name}{suffix}_{mode}_results']+"\nJSON:\n"
         else:
             prompt = ""
-        prompt_list.append(prompt)
+        prompt_list.append((idx, prompt))
     return prompt_list

@@ -1,4 +1,5 @@
 import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "..")))
 from commonsense_constraint import evaluation as commonsense_eval
 from hard_constraint import evaluation as hard_eval
@@ -50,31 +51,75 @@ def paper_term_mapping(commonsense_constraint_record, hard_constraint_record):
     return remap_commonsense_constraint_record, remap_hard_constraint_record
 
 
-def eval_score(set_type: str, file_path: str):
+def parse_query_indices(query_indices, max_len=None):
+    if not query_indices:
+        return list(range(1, max_len + 1)) if max_len else []
+    indices = []
+    for part in query_indices.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            start, end = map(int, part.split('-'))
+            indices.extend(range(start, end + 1))
+        else:
+            indices.append(int(part))
+    indices = sorted(list(set(indices)))
+    if max_len:
+        indices = [i for i in indices if 1 <= i <= max_len]
+    return indices
+
+
+def eval_score(set_type: str, file_path: str, query_indices: str = None, return_per_query: bool = False):
 
     if set_type == 'train':
         query_data_list  = load_dataset('osunlp/TravelPlanner','train',download_mode="force_redownload")['train']
     elif set_type == 'validation':
         query_data_list  = load_dataset('osunlp/TravelPlanner','validation',download_mode="force_redownload")['validation']
 
-    
     query_data_list = [x for x in query_data_list]
     hardConstraint_statistic= {level:{day:[] for day in [3,5,7]} for level in ['easy','medium','hard']} 
     commonsenseConstraint_statistic = {level:{day:[] for day in [3,5,7]} for level in ['easy','medium','hard']} 
-    tested_plans = load_line_json_data(file_path)
+    tested_plans_raw = load_line_json_data(file_path)
+    tested_plans_map = {}
+    for item in tested_plans_raw:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except Exception:
+                try:
+                    item = eval(item)
+                except Exception:
+                    continue
+        if isinstance(item, dict) and 'idx' in item:
+            tested_plans_map[item['idx']] = item
+
+    if query_indices:
+        target_indices = parse_query_indices(query_indices, len(query_data_list))
+    else:
+        target_indices = list(range(1, len(query_data_list) + 1))
+
     delivery_cnt = 0
     plan_constraint_store = []
-    for idx in tqdm(range(0,len(query_data_list))):
-        query_data = query_data_list[idx]
-        tested_plan = tested_plans[idx]
+    for q_idx in tqdm(target_indices, desc="Evaluating plans"):
+        query_data = query_data_list[q_idx - 1]
+        tested_plan = tested_plans_map.get(q_idx)
+        if tested_plan is None and (q_idx - 1) < len(tested_plans_raw):
+            tested_plan = tested_plans_raw[q_idx - 1]
+            if isinstance(tested_plan, str):
+                try:
+                    tested_plan = json.loads(tested_plan)
+                except Exception:
+                    tested_plan = eval(tested_plan)
+        if tested_plan is None:
+            tested_plan = {'idx': q_idx, 'plan': None}
+
         if type(query_data) == str:
             query_data = eval(query_data)
-        if type(tested_plan) == str:
-            tested_plan = eval(tested_plan)
         if type(query_data['local_constraint']) == str:
             query_data['local_constraint'] = eval(query_data['local_constraint'])
 
-        if tested_plan['plan']:
+        if tested_plan.get('plan'):
             delivery_cnt += 1
             commonsense_info_box = commonsense_eval(query_data,tested_plan['plan'])
         else:
@@ -95,7 +140,8 @@ def eval_score(set_type: str, file_path: str):
     mapping_constraint_record = {key: {day: {'valid_room_rule':0, 'valid_cuisine':0, 'valid_room_type':0, 'valid_transportation':0} for day in [3,5,7]} for key in ['medium','hard']}
     count_record = {key:{day:0 for day in [3,5,7]} for key in ['easy','medium','hard']}
 
-    for unit in query_data_list:
+    for q_idx in target_indices:
+        unit = query_data_list[q_idx - 1]
         count_record[unit['level']][unit['days']] += 1
         for key in constraint_record['medium'][3]:
             if unit['local_constraint'][key] != None:
@@ -152,34 +198,69 @@ def eval_score(set_type: str, file_path: str):
     final_commonsense_cnt = 0
     final_hardConstraint_cnt = 0
     final_all_cnt_map = {level:0 for level in ['easy','medium','hard']}
-    for idx in (range(0,len(query_data_list))):
-        if plan_constraint_store[idx]['commonsense_constraint']:
+    per_query_results = []
+
+    for store_idx, q_idx in enumerate(target_indices):
+        query_data = query_data_list[q_idx - 1]
+        cs_box = plan_constraint_store[store_idx]['commonsense_constraint']
+        hd_box = plan_constraint_store[store_idx]['hard_constraint']
+        is_delivered = bool(tested_plans_map.get(q_idx, {}).get('plan'))
+        cs_pass = False
+        hd_pass = False
+
+        if cs_box:
             final_commonsense_pass = True
             final_hardConstraint_pass = True
-            for item in plan_constraint_store[idx]['commonsense_constraint']:
-                if plan_constraint_store[idx]['commonsense_constraint'][item][0] is not None and not plan_constraint_store[idx]['commonsense_constraint'][item][0]:
+            for item in cs_box:
+                if cs_box[item][0] is not None and not cs_box[item][0]:
                     final_commonsense_pass = False
                     break
-            if plan_constraint_store[idx]['hard_constraint'] is None:
-                continue
-            for item in plan_constraint_store[idx]['hard_constraint']:
-                if plan_constraint_store[idx]['hard_constraint'][item][0] is not None and  plan_constraint_store[idx]['hard_constraint'][item][0] == False:
-                    final_hardConstraint_pass = False
-                    break
+            if hd_box is None:
+                final_hardConstraint_pass = False
+            else:
+                for item in hd_box:
+                    if hd_box[item][0] is not None and hd_box[item][0] == False:
+                        final_hardConstraint_pass = False
+                        break
                 
-            if final_commonsense_pass:
-                final_commonsense_cnt += 1
-            if final_hardConstraint_pass:
-                final_hardConstraint_cnt += 1
-            if final_commonsense_pass and final_hardConstraint_pass:
-                final_all_cnt += 1
-                final_all_cnt_map[query_data_list[idx]['level']] += 1
+            if hd_box is not None:
+                if final_commonsense_pass:
+                    final_commonsense_cnt += 1
+                if final_hardConstraint_pass:
+                    final_hardConstraint_cnt += 1
+                if final_commonsense_pass and final_hardConstraint_pass:
+                    final_all_cnt += 1
+                    final_all_cnt_map[query_data['level']] += 1
+            cs_pass = final_commonsense_pass
+            hd_pass = final_hardConstraint_pass
+
+        per_query_results.append({
+            "idx": q_idx,
+            "level": query_data.get('level'),
+            "days": query_data.get('days'),
+            "delivered": is_delivered,
+            "commonsense_pass": cs_pass,
+            "hard_constraint_pass": hd_pass,
+            "final_pass": cs_pass and hd_pass,
+            "commonsense_details": {k: {"pass": v[0], "reason": v[1]} for k, v in cs_box.items()} if cs_box else None,
+            "hard_details": {k: {"pass": v[0], "reason": v[1]} for k, v in hd_box.items()} if hd_box else None
+        })
 
     result = {}
 
     remap_commonsense_constraint_record, remap_hard_constraint_record = paper_term_mapping(commonsenseConstraint_statistic_processed, hardConstraint_statistic_processed)
 
-    if set_type == 'train':
+    if query_indices:
+        total_eval = len(target_indices)
+        result['Delivery Rate'] = delivery_cnt / total_eval
+        cs_total = constraint_dis_record['commonsense']['total']
+        result['Commonsense Constraint Micro Pass Rate'] = constraint_dis_record['commonsense']['pass'] / cs_total if cs_total > 0 else 0
+        result['Commonsense Constraint Macro Pass Rate'] = final_commonsense_cnt / total_eval
+        hard_total = constraint_dis_record['hard']['total']
+        result['Hard Constraint Micro Pass Rate'] = constraint_dis_record['hard']['pass'] / hard_total if hard_total > 0 else 0
+        result['Hard Constraint Macro Pass Rate'] = final_hardConstraint_cnt / total_eval
+        result['Final Pass Rate'] = final_all_cnt / total_eval
+    elif set_type == 'train':
         result['Delivery Rate'] = delivery_cnt / 45
         result['Commonsense Constraint Micro Pass Rate'] = constraint_dis_record['commonsense']['pass'] / 360
         result['Commonsense Constraint Macro Pass Rate'] = final_commonsense_cnt / 45
@@ -203,21 +284,70 @@ def eval_score(set_type: str, file_path: str):
         result['Hard Constraint Macro Pass Rate'] = final_hardConstraint_cnt / 1000
         result['Final Pass Rate'] = final_all_cnt / 1000
     
-
-    return result, {"Commonsense Constraint":remap_commonsense_constraint_record, "Hard Constraint":remap_hard_constraint_record}
+    detailed_dict = {
+        "Commonsense Constraint": remap_commonsense_constraint_record,
+        "Hard Constraint": remap_hard_constraint_record
+    }
+    if return_per_query:
+        return result, detailed_dict, per_query_results
+    return result, detailed_dict
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--set_type", type=str, default="validation")
     parser.add_argument("--evaluation_file_path", type=str, default="./")
+    parser.add_argument("--query_indices", type=str, default=None, help="Range of query indices to evaluate, e.g. 1-55")
+    parser.add_argument("--output_json_path", type=str, default=None, help="Path to save evaluation results in JSON format")
     args = parser.parse_args()
 
-    scores, detailed_scores = eval_score(args.set_type, file_path=args.evaluation_file_path)
+    scores, detailed_scores, per_query_results = eval_score(
+        args.set_type,
+        file_path=args.evaluation_file_path,
+        query_indices=args.query_indices,
+        return_per_query=True
+    )
 
+    print("\n" + "=" * 55)
+    print("📈 EVALUATION SUMMARY SCORES")
+    print("=" * 55)
     for key in scores:
-        print(f"{key}: {scores[key]*100}%")
-    
-    print("------------------")
-    print(detailed_scores)
-    print("------------------")
+        print(f"• {key}: {scores[key]*100:.2f}%")
+
+    if not args.query_indices and 0 < scores.get('Delivery Rate', 0) < 1.0:
+        delivery_rate = scores['Delivery Rate']
+        total_queries = 180 if args.set_type == 'validation' else (1000 if args.set_type == 'test' else 45)
+        delivered_queries = round(delivery_rate * total_queries)
+        print("\n" + "=" * 55)
+        print(f"📊 SUBSET EVALUATION ({delivered_queries}/{total_queries} queries tested)")
+        print("=" * 55)
+        print(f"Delivery Rate: 100.0% ({delivered_queries}/{delivered_queries})")
+        print(f"Subset Commonsense Macro Pass Rate: {scores['Commonsense Constraint Macro Pass Rate'] / delivery_rate * 100:.2f}%")
+        print(f"Subset Hard Constraint Macro Pass Rate: {scores['Hard Constraint Macro Pass Rate'] / delivery_rate * 100:.2f}%")
+        print(f"Subset Final Pass Rate: {scores['Final Pass Rate'] / delivery_rate * 100:.2f}%")
+        print("=" * 55)
+
+    # Save results to JSON file
+    output_json_path = args.output_json_path
+    if not output_json_path:
+        base_name = os.path.splitext(os.path.basename(args.evaluation_file_path))[0]
+        eval_dir = os.path.dirname(args.evaluation_file_path)
+        output_json_path = os.path.join(eval_dir, f"{base_name}_eval_results.json") if eval_dir else f"./{base_name}_eval_results.json"
+
+    eval_json_data = {
+        "set_type": args.set_type,
+        "evaluation_file_path": args.evaluation_file_path,
+        "query_indices": args.query_indices,
+        "summary": {k: f"{v*100:.2f}%" for k, v in scores.items()},
+        "metrics": scores,
+        "detailed_statistics": detailed_scores,
+        "per_query_evaluation": per_query_results
+    }
+
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_json_path)), exist_ok=True)
+        with open(output_json_path, 'w', encoding='utf-8') as f:
+            json.dump(eval_json_data, f, indent=4, ensure_ascii=False)
+        print(f"\n[+] Results saved to JSON: {os.path.abspath(output_json_path)}")
+    except Exception as e:
+        print(f"\n[-] Failed to save JSON results: {e}")

@@ -1,8 +1,16 @@
 import sys
 import os
 from dotenv import load_dotenv
-load_dotenv()
-sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "..")))
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+repo_root = os.path.abspath(os.path.join(script_dir, "../.."))
+sys.path.insert(0, repo_root)
+sys.path.insert(0, script_dir)
+
+load_dotenv(os.path.join(repo_root, ".env"))
+OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'http://127.0.0.1:20128/v1')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 from langchain.prompts import PromptTemplate
 from agents.prompts import planner_agent_prompt, cot_planner_agent_prompt, react_planner_agent_prompt,reflect_prompt,react_reflect_planner_agent_prompt, REFLECTION_HEADER
 from langchain_community.chat_models import ChatOpenAI, ChatOllama
@@ -97,7 +105,13 @@ class Planner:
         else:
             if not OPENAI_API_KEY:
                 raise ValueError("OPENAI_API_KEY is required when using OpenAI models. Please set it in your .env file.")
-            self.llm = ChatOpenAI(model_name=model_name, temperature=0, max_tokens=4096, openai_api_key=OPENAI_API_KEY)
+            self.llm = ChatOpenAI(
+                model_name=model_name,
+                temperature=0,
+                max_tokens=4096,
+                openai_api_key=OPENAI_API_KEY,
+                openai_api_base=OPENAI_API_BASE
+            )
 
 
         # Debug logging to make routing explicit when debugging backends.
@@ -150,6 +164,7 @@ class ReactPlanner:
                 temperature=0,
                 max_tokens=1024,
                 openai_api_key=OPENAI_API_KEY,
+                openai_api_base=OPENAI_API_BASE,
                 model_kwargs={"stop": ["Action", "Thought", "Observation"]},
             )
         self.env = ReactEnv()
@@ -277,8 +292,22 @@ class ReactReflectPlanner:
         else:
             if not OPENAI_API_KEY:
                 raise ValueError("OPENAI_API_KEY is required when using OpenAI models. Please set it in your .env file.")
-            self.react_llm = ChatOpenAI(model_name=model_name, temperature=0, max_tokens=1024, openai_api_key=OPENAI_API_KEY,model_kwargs={"stop": ["Action","Thought","Observation,'\n"]})
-            self.reflect_llm = ChatOpenAI(model_name=model_name, temperature=0, max_tokens=1024, openai_api_key=OPENAI_API_KEY,model_kwargs={"stop": ["Action","Thought","Observation,'\n"]})
+            self.react_llm = ChatOpenAI(
+                model_name=model_name,
+                temperature=0,
+                max_tokens=1024,
+                openai_api_key=OPENAI_API_KEY,
+                openai_api_base=OPENAI_API_BASE,
+                model_kwargs={"stop": ["Action", "Thought", "Observation", "\n"]}
+            )
+            self.reflect_llm = ChatOpenAI(
+                model_name=model_name,
+                temperature=0,
+                max_tokens=1024,
+                openai_api_key=OPENAI_API_KEY,
+                openai_api_base=OPENAI_API_BASE,
+                model_kwargs={"stop": ["Action", "Thought", "Observation", "\n"]}
+            )
         self.model_name = model_name
         self.env = ReactReflectEnv()
         self.query = None
