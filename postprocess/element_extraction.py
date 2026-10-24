@@ -45,11 +45,15 @@ if __name__ == '__main__':
     clean_model_name = args.model_name.replace('/', '_')
     tmp_path = f'{args.tmp_dir}/{args.set_type}_{clean_model_name}{suffix}_{args.mode}.txt'
     if not os.path.exists(tmp_path):
-        legacy_path = f'{args.tmp_dir}/{args.set_type}_{args.model_name}{suffix}_{args.mode}.txt'
-        if os.path.exists(legacy_path):
-            tmp_path = legacy_path
+        sub_tmp = os.path.join(args.tmp_dir, 'tmp', f'{args.set_type}_{clean_model_name}{suffix}_{args.mode}.txt')
+        if os.path.exists(sub_tmp):
+            tmp_path = sub_tmp
         else:
-            raise FileNotFoundError(
+            legacy_path = f'{args.tmp_dir}/{args.set_type}_{args.model_name}{suffix}_{args.mode}.txt'
+            if os.path.exists(legacy_path):
+                tmp_path = legacy_path
+            else:
+                raise FileNotFoundError(
                 f"\n[!] Chua tim thay file ket qua parse: '{tmp_path}'\n"
                 f"[!] Ly do: Buoc 'parsing.py' chua duoc chay hoac chua tao duoc file ket qua.\n"
                 f"[!] Vui long chay 'python parsing.py ...' truoc khi chay 'element_extraction.py'."
@@ -122,9 +126,18 @@ if __name__ == '__main__':
                     except Exception:
                         parsed = None
 
-            generated_plan[-1][f'{args.model_name}{suffix}_{args.mode}_parsed_results'] = parsed
             if parsed is not None:
-                extracted_count += 1
+                # Validate that parsed plan is a valid list of daily dictionaries with 'current_city'
+                is_valid_itinerary = isinstance(parsed, list) and len(parsed) > 0 and all(
+                    isinstance(day, dict) and 'current_city' in day for day in parsed
+                )
+                if not is_valid_itinerary:
+                    print(f"⚠️  Query {idx}: Parsed JSON is not a valid daily itinerary (missing 'current_city'). Treated as invalid.")
+                    parsed = None
+                else:
+                    extracted_count += 1
+
+            generated_plan[-1][f'{args.model_name}{suffix}_{args.mode}_parsed_results'] = parsed
         else:
             generated_plan[-1][f'{args.model_name}{suffix}_{args.mode}_parsed_results'] = None
   

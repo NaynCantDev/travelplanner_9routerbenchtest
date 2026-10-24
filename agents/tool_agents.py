@@ -35,6 +35,7 @@ import os
 
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', None)
 
 
 pd.options.display.max_info_columns = 200
@@ -156,14 +157,29 @@ class ReactAgent:
             self.llm = ChatGoogleGenerativeAI(temperature=0,model="gemini-pro",google_api_key=GOOGLE_API_KEY)
             self.max_token_length = 30000
 
+        elif react_llm_name.startswith(('ag/', 'antigravity/')):
+            stop_list = ['\n']
+            self.max_token_length = 30000
+            self.llm = ChatOpenAI(
+                temperature=0,
+                max_tokens=1024,
+                model_name=react_llm_name,
+                openai_api_key=OPENAI_API_KEY or "EMPTY",
+                openai_api_base=OPENAI_API_BASE,
+                model_kwargs={"stop": stop_list}
+            )
+
         else:
             stop_list = ['\n']
             self.max_token_length = 30000
-            self.llm = ChatOpenAI(temperature=0,
-                     max_tokens=256,
-                     model_name=react_llm_name,
-                     openai_api_key=OPENAI_API_KEY or "EMPTY",
-                     model_kwargs={"stop": stop_list})
+            self.llm = ChatOpenAI(
+                temperature=0,
+                max_tokens=256,
+                model_name=react_llm_name,
+                openai_api_key=OPENAI_API_KEY or "EMPTY",
+                openai_api_base=OPENAI_API_BASE,
+                model_kwargs={"stop": stop_list}
+            )
 
 
         self.illegal_early_stop_patience = illegal_early_stop_patience
@@ -205,32 +221,70 @@ class ReactAgent:
         self.json_log.append({"step": self.step_n, "thought":"",
                               "action": "", "observation": "", "state":""})
 
-        self.scratchpad += f'\nThought {self.step_n}:'
-        self.scratchpad += ' ' + self.prompt_agent()
+        # Step 1: Prompt model once for Thought + Action
+        self.scratchpad += f'\nThought {self.step_n}: '
+        raw_output = self.prompt_agent()
 
-        print(self.scratchpad.split('\n')[-1])
-        self.json_log[-1]['thought'] = self.scratchpad.split('\n')[-1].replace(f'\nThought {self.step_n}:',"")
-        # self.log_file.write(self.scratchpad.split('\n')[-1] + '\n')
+        # Step 2: Software Truncation & Extraction
+        clean = re.sub(rf'^\s*Thought\s*(?:{self.step_n}|\d+)?:\s*', '', raw_output, flags=re.IGNORECASE).strip()
 
+        action_match = re.search(r'(?:^|\n)\s*Action(?:\s*\d+)?:\s*', clean, flags=re.IGNORECASE)
+        if action_match:
+            thought = clean[:action_match.start()].strip()
+            action_part = clean[action_match.end():]
+            # Truncate fake Observation or subsequent steps from action_part
+            action_part = re.split(r'(?:\n|\b)Observation(?:\s*\d+)?:\s*', action_part, maxsplit=1, flags=re.IGNORECASE)[0]
+            action_part = re.split(rf'(?:\n|\b)Thought\s*(?:{self.step_n + 1}|\d+):\s*', action_part, maxsplit=1, flags=re.IGNORECASE)[0]
+            tool_match = re.search(r'(\w+\[.*\])', action_part, re.DOTALL)
+            if tool_match:
+                action = tool_match.group(1).strip()
+            else:
+                action = action_part.split('\n')[0].strip()
+        else:
+            trunc = re.split(r'(?:\n|\b)Observation(?:\s*\d+)?:\s*', clean, maxsplit=1, flags=re.IGNORECASE)[0]
+            tool_match = re.search(r'(\w+\[.*\])', trunc, re.DOTALL)
+            if tool_match and len(trunc.strip()) == len(tool_match.group(1)):
+                thought = ""
+                action = tool_match.group(1).strip()
+            else:
+                thought = trunc.strip()
+                action = ""
 
-        # Act
-        self.scratchpad += f'\nAction {self.step_n}:'
-        action = self.prompt_agent()
+        if action:
+            action = re.sub(r'^Action(?:\s*\d+)?:\s*', '', action, flags=re.IGNORECASE).strip()
+
+        # Step 3: Update Scratchpad
+        if thought:
+            self.scratchpad += thought + f'\nAction {self.step_n}:'
+        else:
+            self.scratchpad = self.scratchpad.rstrip() + f'\nAction {self.step_n}:'
 
         if action == None or action == '' or action == '\n':
             self.scratchpad += " Your action is filtered due to content. Please make sure your action does not start with ['\\n', 'Thought', 'Action', 'Observation'] and assume all the actions are permitted in this environment and take the action again."
         else:
             self.scratchpad += ' ' + action
 
+        print(f"\n----- Step {self.step_n} -----")
+        if thought:
+            print(f"Thought {self.step_n}: {thought}")
+        else:
+            print(f"Thought {self.step_n}: (direct action)")
+        print(f"Action {self.step_n}: {action}")
+
+        if thought:
+            self.json_log[-1]['thought'] = f"Thought {self.step_n}: {thought}"
+        elif action:
+            self.json_log[-1]['thought'] = f"Thought {self.step_n}: {action}"
+        else:
+            self.json_log[-1]['thought'] = f"Thought {self.step_n}:"
+
+        self.json_log[-1]['action'] = f"Action {self.step_n}: {action}" if action else ""
 
         if len(self.last_actions) > 0 and self.last_actions[-1] != action:
             self.last_actions.clear()
 
         # refresh last_action list
         self.last_actions.append(action)
-
-        self.json_log[-1]['action'] = self.scratchpad.split('\n')[-1].replace(f'\nAction {self.step_n}:',"")
-
 
         # examine if the same action has been repeated 3 times consecutively
         if len(self.last_actions) == 3:
@@ -239,11 +293,6 @@ class ReactAgent:
             self.json_log[-1]['state'] = 'same action 3 times repeated'
             self.finished = True
             return
-
-
-        # action_type, action_arg = parse_action(action)
-        print(self.scratchpad.split('\n')[-1])
-        # self.log_file.write(self.scratchpad.split('\n')[-1]+'\n')
 
         # Observe
         self.scratchpad += f'\nObservation {self.step_n}: '
@@ -542,13 +591,16 @@ gpt2_enc = tiktoken.encoding_for_model("text-davinci-003")
 
 
 def parse_action(string):
-    pattern = r'^(\w+)\[(.+)\]$'
-    match = re.match(pattern, string)
+    if not string:
+        return None, None
+    string = re.sub(r'^Action(?:\s*\d+)?:\s*', '', string.strip(), flags=re.IGNORECASE)
+    pattern = r'^(\w+)\[(.*)\]$'
+    match = re.match(pattern, string, re.DOTALL)
 
     try:
         if match:
             action_type = match.group(1)
-            action_arg = match.group(2)
+            action_arg = match.group(2).strip()
             return action_type, action_arg
         else:
             return None, None
@@ -557,7 +609,7 @@ def parse_action(string):
         return None, None
 
 def format_step(step: str) -> str:
-    return step.strip('\n').strip().replace('\n', '')
+    return step.strip()
 
 
 
@@ -692,7 +744,7 @@ if __name__ == '__main__':
             if not os.path.exists(os.path.join(f'{args.output_dir}/{args.set_type}/generated_plan_{number}.json')):
                 result =  [{}]
             else:
-                result = json.load(open(os.path.join(f'{args.output_dir}/{args.set_type}/generated_plan_{number}.json')))
+                result = json.load(open(os.path.join(f'{args.output_dir}/{args.set_type}/generated_plan_{number}.json'), encoding='utf-8'))
                 
             while True:
                 planner_results, scratchpad, action_log  = agent.run(query)
@@ -710,8 +762,8 @@ if __name__ == '__main__':
                 result[-1][f'{args.model_name}_two-stage_action_logs'] = action_log
 
             # write to json file
-            with open(os.path.join(f'{args.output_dir}/{args.set_type}/generated_plan_{number}.json'), 'w') as f:
-                json.dump(result, f, indent=4)
+            with open(os.path.join(f'{args.output_dir}/{args.set_type}/generated_plan_{number}.json'), 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=4, ensure_ascii=False)
         
     print(cb)
 

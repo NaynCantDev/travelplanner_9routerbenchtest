@@ -119,7 +119,12 @@ def eval_score(set_type: str, file_path: str, query_indices: str = None, return_
         if type(query_data['local_constraint']) == str:
             query_data['local_constraint'] = eval(query_data['local_constraint'])
 
-        if tested_plan.get('plan'):
+        is_delivered = False
+        if tested_plan.get('plan') and isinstance(tested_plan['plan'], list) and len(tested_plan['plan']) > 0:
+            if all(isinstance(day, dict) and 'current_city' in day for day in tested_plan['plan']):
+                is_delivered = True
+
+        if is_delivered:
             delivery_cnt += 1
             commonsense_info_box = commonsense_eval(query_data,tested_plan['plan'])
         else:

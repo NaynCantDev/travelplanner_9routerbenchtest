@@ -14,10 +14,15 @@ evaluation/validation/*.json
 # Local experiment outputs & scratch files
 __MACOSX/
 agents/output_validate/
-agents/output/
+agents/output_validate_old/
+agents/output_gemini_3.8_flash_high/
+agents/output_gemini_3.8_flash_low/
+agents/output_gemini_3.8_flash_medium/
+agents/output_gemini_3.8_pro_low/
 agents/tmp/
 evaluation/tmp/
 postprocess/submission/
+postprocess/submission_old/
 postprocess/tmp/
 postprocess/*_eval_results.json
 test_1000_queries.json
